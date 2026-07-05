@@ -1,0 +1,25 @@
+#!/bin/bash
+set -ex
+
+sudo -u ec2-user -i <<'INNER'
+set -ex
+
+# Pull the lab files staged in S3 into the notebook home directory.
+aws s3 sync s3://${bucket}/lab /home/ec2-user/SageMaker/lab
+
+# MLflow tracking server URL (injected at apply time from the load balancer).
+MLFLOW_URL="${mlflow_url}"
+
+# Patch tracking_uri in the local notebook copies only (S3 copies stay untouched).
+for f in /home/ec2-user/SageMaker/lab/*.ipynb; do
+  python3 - "$f" "$MLFLOW_URL" <<'PY'
+import re, sys
+path, url = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    data = fh.read()
+data = re.sub(r"tracking_uri = '[^']*'", "tracking_uri = '%s'" % url, data)
+with open(path, "w") as fh:
+    fh.write(data)
+PY
+done
+INNER

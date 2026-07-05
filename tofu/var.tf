@@ -39,3 +39,15 @@ variable "container_cli" {
   type        = string
   default     = "docker"
 }
+
+variable "notebook_instance_type" {
+  description = "Instance type for the SageMaker notebook instance."
+  type        = string
+  default     = "ml.t3.medium"
+}
+
+variable "notebook_volume_size" {
+  description = "EBS volume size (GB) for the SageMaker notebook instance."
+  type        = number
+  default     = 5
+}

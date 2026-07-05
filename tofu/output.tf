@@ -17,3 +17,8 @@ output "rds_endpoint" {
   description = "Endpoint address of the MLflow backend RDS instance."
   value       = aws_db_instance.mysql.address
 }
+
+output "sagemaker_notebook_name" {
+  description = "Name of the SageMaker notebook instance."
+  value       = aws_sagemaker_notebook_instance.mlflow.name
+}

@@ -444,3 +444,148 @@ resource "aws_appautoscaling_policy" "mlflow_cpu" {
     scale_out_cooldown = 60
   }
 }
+
+# ==================================================
+# ============= SAGEMAKER NOTEBOOK =================
+# ==================================================
+# IAM role the notebook instance assumes to call SageMaker and S3.
+resource "aws_iam_role" "sagemaker_notebook" {
+  name = "${var.project_name}-sagemaker-notebook-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "sagemaker.amazonaws.com"
+        }
+      }
+    ]
+  })
+  tags = local.default_tags
+}
+
+resource "aws_iam_role_policy_attachment" "sagemaker_notebook_full_access" {
+  role       = aws_iam_role.sagemaker_notebook.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
+}
+
+# POC convenience: broad S3 and ECR access for the notebook (not recommended for production).
+resource "aws_iam_role_policy_attachment" "sagemaker_notebook_s3_full" {
+  role       = aws_iam_role.sagemaker_notebook.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+}
+
+resource "aws_iam_role_policy_attachment" "sagemaker_notebook_ecr_full" {
+  role       = aws_iam_role.sagemaker_notebook.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess"
+}
+
+# The notebook passes its own role to SageMaker for training jobs and endpoints.
+# AmazonSageMakerFullAccess only allows PassRole for roles named "*AmazonSageMaker*",
+# so grant an explicit PassRole for this role.
+resource "aws_iam_role_policy" "sagemaker_notebook_passrole" {
+  name = "${var.project_name}-sagemaker-notebook-passrole"
+  role = aws_iam_role.sagemaker_notebook.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = aws_iam_role.sagemaker_notebook.arn
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "sagemaker.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# Matches the console role wizard's "Any S3 bucket with 'sagemaker' in the name" option.
+resource "aws_iam_role_policy" "sagemaker_notebook_s3" {
+  name = "${var.project_name}-sagemaker-notebook-s3"
+  role = aws_iam_role.sagemaker_notebook.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::*SageMaker*",
+          "arn:aws:s3:::*Sagemaker*",
+          "arn:aws:s3:::*sagemaker*"
+        ]
+      }
+    ]
+  })
+}
+
+# Allow the notebook to read the lab files staged in the artifact bucket.
+resource "aws_iam_role_policy" "sagemaker_notebook_lab" {
+  name = "${var.project_name}-sagemaker-notebook-lab"
+  role = aws_iam_role.sagemaker_notebook.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:ListBucket"]
+        Resource = [aws_s3_bucket.my_bucket.arn, "${aws_s3_bucket.my_bucket.arn}/*"]
+      }
+    ]
+  })
+}
+
+# Stage the lab/ folder in S3 so the notebook can pull it on start.
+resource "aws_s3_object" "lab" {
+  for_each = fileset("${path.module}/../lab", "**")
+
+  bucket = aws_s3_bucket.my_bucket.id
+  key    = "lab/${each.value}"
+  source = "${path.module}/../lab/${each.value}"
+  etag   = filemd5("${path.module}/../lab/${each.value}")
+  tags   = local.default_tags
+}
+
+# On start, sync the staged lab/ folder into the notebook's home directory
+# and patch the tracking_uri with the load balancer URL injected at apply time.
+resource "aws_sagemaker_notebook_instance_lifecycle_configuration" "lab" {
+  name = "${var.project_name}-lab"
+
+  on_start = base64encode(templatefile("${path.module}/lab_sync.sh.tftpl", {
+    bucket     = aws_s3_bucket.my_bucket.bucket
+    mlflow_url = "http://${aws_lb.mlflow.dns_name}"
+  }))
+}
+
+resource "aws_sagemaker_notebook_instance" "mlflow" {
+  name                  = var.project_name
+  role_arn              = aws_iam_role.sagemaker_notebook.arn
+  instance_type         = var.notebook_instance_type
+  volume_size           = var.notebook_volume_size
+  platform_identifier   = "notebook-al2023-v1"
+  root_access           = "Enabled"
+  lifecycle_config_name = aws_sagemaker_notebook_instance_lifecycle_configuration.lab.name
+
+  instance_metadata_service_configuration {
+    minimum_instance_metadata_service_version = "2"
+  }
+
+  depends_on = [aws_s3_object.lab]
+
+  tags = local.default_tags
+}
